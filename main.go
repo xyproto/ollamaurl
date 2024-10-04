@@ -51,7 +51,7 @@ func (c *Client) GetManifest(ctx context.Context, modelName string, tag string) 
 	manifestURL := c.base.ResolveReference(&url.URL{
 		Path: path.Join("v2", "library", modelName, "manifests", tag),
 	})
-	//fmt.Printf("Fetching manifest from: %s\n", manifestURL.String())
+	fmt.Printf("Fetching manifest from: %s\n", manifestURL.String())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL.String(), nil)
 	if err != nil {
@@ -166,7 +166,18 @@ func main() {
 	// Collect the blob URLs and filenames
 	var blobURLs, filenames []string
 
-	for _, layer := range manifest.Layers {
+	// Process the Config layer if it exists
+	if manifest.Config.Digest != "" {
+		fmt.Printf("Processing config layer: digest = %s\n", manifest.Config.Digest)
+		blobURL := constructBlobURL(baseURL, repository, manifest.Config.Digest)
+		filename := createFilename(manifest.Config.Digest)
+		blobURLs = append(blobURLs, blobURL)
+		filenames = append(filenames, filename)
+	}
+
+	// Process the Layers
+	for i, layer := range manifest.Layers {
+		fmt.Printf("Processing layer %d: digest = %s, mediaType = %s\n", i, layer.Digest, layer.MediaType)
 		blobURL := constructBlobURL(baseURL, repository, layer.Digest)
 		filename := createFilename(layer.Digest)
 		blobURLs = append(blobURLs, blobURL)
