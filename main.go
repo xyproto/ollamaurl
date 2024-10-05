@@ -14,6 +14,7 @@ import (
 )
 
 const (
+	versionString    = "ollamaurl 1.0.0"
 	registryBaseURL  = "https://registry.ollama.ai"
 	defaultModelTag  = "tinyllama:latest"
 	manifestFilename = "manifest.json"
@@ -150,9 +151,27 @@ func updatePKGBUILD(urls []string, filenames []string) error {
 }
 
 func main() {
-	updateFlag := flag.Bool("update-pkgbuild", false, "Update the ./PKGBUILD with URLs for the given model")
-	verboseFlag := flag.Bool("verbose", false, "Verbose")
+	// Define flags with both long and short versions
+	updateFlagLong := flag.Bool("update-pkgbuild", false, "Update the ./PKGBUILD with URLs for the given model")
+	updateFlagShort := flag.Bool("u", false, "Update the ./PKGBUILD with URLs for the given model")
+
+	verboseFlagLong := flag.Bool("verbose", false, "Verbose")
+	verboseFlagShort := flag.Bool("V", false, "Verbose")
+
+	versionFlagLong := flag.Bool("version", false, "Show the current version")
+	versionFlagShort := flag.Bool("v", false, "Show the current version")
+
 	flag.Parse()
+
+	// Combine long and short flags
+	updateFlag := *updateFlagLong || *updateFlagShort
+	verboseFlag := *verboseFlagLong || *verboseFlagShort
+	versionFlag := *versionFlagLong || *versionFlagShort
+
+	if versionFlag {
+		fmt.Println(versionString)
+		return
+	}
 
 	baseURL, err := url.Parse(registryBaseURL)
 	if err != nil {
@@ -170,7 +189,7 @@ func main() {
 	repository, tag := ParseModelPath(modelName)
 
 	// Retrieve the manifest for the model
-	manifest, err := client.GetManifest(context.Background(), repository, tag, *verboseFlag)
+	manifest, err := client.GetManifest(context.Background(), repository, tag, verboseFlag)
 	if err != nil {
 		log.Fatalf("Error retrieving manifest: %v", err)
 	}
@@ -180,7 +199,7 @@ func main() {
 
 	// Process the Config layer if it exists
 	if manifest.Config.Digest != "" {
-		if *verboseFlag {
+		if verboseFlag {
 			fmt.Printf("Processing config layer: digest = %s\n", manifest.Config.Digest)
 		}
 		blobURL := constructBlobURL(baseURL, repository, manifest.Config.Digest)
@@ -191,7 +210,7 @@ func main() {
 
 	// Process the Layers
 	for i, layer := range manifest.Layers {
-		if *verboseFlag {
+		if verboseFlag {
 			fmt.Printf("Processing layer %d: digest = %s, mediaType = %s\n", i, layer.Digest, layer.MediaType)
 		}
 		blobURL := constructBlobURL(baseURL, repository, layer.Digest)
@@ -208,7 +227,7 @@ func main() {
 	blobURLs = append(blobURLs, manifestURL)
 	filenames = append(filenames, manifestFilename)
 
-	if *updateFlag {
+	if updateFlag {
 		if err := updatePKGBUILD(blobURLs, filenames); err != nil {
 			log.Fatalf("Failed to update PKGBUILD: %v", err)
 		}
