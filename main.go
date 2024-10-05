@@ -13,6 +13,12 @@ import (
 	"strings"
 )
 
+const (
+	registryBaseURL  = "https://registry.ollama.ai"
+	defaultModelTag  = "tinyllama:latest"
+	manifestFilename = "manifest.json"
+)
+
 type Layer struct {
 	Digest    string `json:"digest"`
 	Size      int64  `json:"size"`
@@ -47,11 +53,13 @@ func ParseModelPath(name string) (string, string) {
 }
 
 // GetManifest retrieves the model's manifest from the registry
-func (c *Client) GetManifest(ctx context.Context, modelName string, tag string) (*Manifest, error) {
+func (c *Client) GetManifest(ctx context.Context, modelName, tag string, verbose bool) (*Manifest, error) {
 	manifestURL := c.base.ResolveReference(&url.URL{
 		Path: path.Join("v2", "library", modelName, "manifests", tag),
 	})
-	fmt.Printf("Fetching manifest from: %s\n", manifestURL.String())
+	if verbose {
+		fmt.Printf("Fetching manifest from: %s\n", manifestURL.String())
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL.String(), nil)
 	if err != nil {
@@ -114,7 +122,11 @@ func updatePKGBUILD(urls []string, filenames []string) error {
 				// Append new URLs with filenames
 				for i, url := range urls {
 					filename := filenames[i]
-					newLines = append(newLines, fmt.Sprintf("    '%s::%s'", filename, url))
+					if filename == manifestFilename {
+						newLines = append(newLines, fmt.Sprintf("    '%s::%s'", filename, url))
+					} else {
+						newLines = append(newLines, fmt.Sprintf("    '%s'", url))
+					}
 				}
 				newLines = append(newLines, line)
 				continue
@@ -138,18 +150,18 @@ func updatePKGBUILD(urls []string, filenames []string) error {
 }
 
 func main() {
-	fetchFlag := flag.Bool("fetch", false, "Fetch the URLs for the given model")
 	updateFlag := flag.Bool("update-pkgbuild", false, "Update the ./PKGBUILD with URLs for the given model")
+	verboseFlag := flag.Bool("verbose", false, "Verbose")
 	flag.Parse()
 
-	baseURL, err := url.Parse("https://registry.ollama.ai")
+	baseURL, err := url.Parse(registryBaseURL)
 	if err != nil {
 		log.Fatalf("Error parsing URL: %v", err)
 	}
 	client := NewClient(baseURL, http.DefaultClient)
 
 	// Define the model name (e.g., "tinyllama:latest")
-	modelName := "tinyllama:latest"
+	modelName := defaultModelTag
 	if len(flag.Args()) > 0 {
 		modelName = flag.Args()[0]
 	}
@@ -158,7 +170,7 @@ func main() {
 	repository, tag := ParseModelPath(modelName)
 
 	// Retrieve the manifest for the model
-	manifest, err := client.GetManifest(context.Background(), repository, tag)
+	manifest, err := client.GetManifest(context.Background(), repository, tag, *verboseFlag)
 	if err != nil {
 		log.Fatalf("Error retrieving manifest: %v", err)
 	}
@@ -168,7 +180,9 @@ func main() {
 
 	// Process the Config layer if it exists
 	if manifest.Config.Digest != "" {
-		fmt.Printf("Processing config layer: digest = %s\n", manifest.Config.Digest)
+		if *verboseFlag {
+			fmt.Printf("Processing config layer: digest = %s\n", manifest.Config.Digest)
+		}
 		blobURL := constructBlobURL(baseURL, repository, manifest.Config.Digest)
 		filename := createFilename(manifest.Config.Digest)
 		blobURLs = append(blobURLs, blobURL)
@@ -177,7 +191,9 @@ func main() {
 
 	// Process the Layers
 	for i, layer := range manifest.Layers {
-		fmt.Printf("Processing layer %d: digest = %s, mediaType = %s\n", i, layer.Digest, layer.MediaType)
+		if *verboseFlag {
+			fmt.Printf("Processing layer %d: digest = %s, mediaType = %s\n", i, layer.Digest, layer.MediaType)
+		}
 		blobURL := constructBlobURL(baseURL, repository, layer.Digest)
 		filename := createFilename(layer.Digest)
 		blobURLs = append(blobURLs, blobURL)
@@ -189,19 +205,22 @@ func main() {
 		Path: path.Join("v2", "library", repository, "manifests", tag),
 	}).String()
 
-	manifestFilename := fmt.Sprintf("%s-%s.manifest.json", repository, tag)
 	blobURLs = append(blobURLs, manifestURL)
 	filenames = append(filenames, manifestFilename)
 
-	if *fetchFlag {
-		fmt.Println("Download URLs for the model:")
-		for i, url := range blobURLs {
-			filename := filenames[i]
-			fmt.Printf("%s::%s\n", filename, url)
-		}
-	} else if *updateFlag {
+	if *updateFlag {
 		if err := updatePKGBUILD(blobURLs, filenames); err != nil {
 			log.Fatalf("Failed to update PKGBUILD: %v", err)
 		}
+		return
+	}
+
+	for i, url := range blobURLs {
+		filename := filenames[i]
+		if filename == manifestFilename {
+			fmt.Printf("%s::%s\n", filename, url)
+			continue
+		}
+		fmt.Printf("%s\n", url)
 	}
 }
