@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	versionString    = "ollamaurl 1.0.1"
+	versionString    = "ollamaurl 1.0.2"
 	defaultRegistry  = "https://registry.ollama.ai"
 	defaultModelTag  = "tinyllama:latest"
 	manifestFilename = "manifest.json"
@@ -176,6 +176,9 @@ func main() {
 	modelName := defaultModelTag
 	if len(pflag.Args()) > 0 {
 		modelName = pflag.Args()[0]
+	} else {
+		fmt.Fprintln(os.Stderr, "Please supply a model name and an optional tag as the first argument, like: tinyllama:latest")
+		os.Exit(1)
 	}
 
 	// Parse the model name into repository and tag
