@@ -3,19 +3,23 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
+
+	"github.com/spf13/pflag"
 )
 
 const (
-	versionString    = "ollamaurl 1.0.0"
-	registryBaseURL  = "https://registry.ollama.ai"
+	versionString    = "ollamaurl 1.0.1"
+	defaultRegistry  = "https://registry.ollama.ai"
 	defaultModelTag  = "tinyllama:latest"
 	manifestFilename = "manifest.json"
 )
@@ -38,10 +42,10 @@ type Client struct {
 	http *http.Client
 }
 
-func NewClient(base *url.URL, http *http.Client) *Client {
+func NewClient(base *url.URL, httpClient *http.Client) *Client {
 	return &Client{
 		base: base,
-		http: http,
+		http: httpClient,
 	}
 }
 
@@ -64,11 +68,11 @@ func (c *Client) GetManifest(ctx context.Context, modelName, tag string, verbose
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL.String(), nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating HTTP request: %w", err)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("performing HTTP request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -78,7 +82,7 @@ func (c *Client) GetManifest(ctx context.Context, modelName, tag string, verbose
 
 	var manifest Manifest
 	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding manifest JSON: %w", err)
 	}
 
 	return &manifest, nil
@@ -98,98 +102,90 @@ func createFilename(digest string) string {
 }
 
 // updatePKGBUILD updates the source array in the PKGBUILD with new URLs and filenames
-func updatePKGBUILD(urls []string, filenames []string) error {
-	pkgbuildPath := "./PKGBUILD"
+func updatePKGBUILD(urls []string, filenames []string, verbose bool) error {
+	pkgbuildPath := filepath.Join(".", "PKGBUILD")
 	// Read the existing PKGBUILD
 	content, err := os.ReadFile(pkgbuildPath)
 	if err != nil {
-		return fmt.Errorf("failed to read PKGBUILD: %v", err)
+		return fmt.Errorf("failed to read PKGBUILD: %w", err)
 	}
-	lines := strings.Split(string(content), "\n")
 
-	// Remove old URLs that contain "registry.ollama.ai" from the source array
-	newLines := []string{}
-	inSourceArray := false
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmedLine, "source=(") {
-			inSourceArray = true
-			newLines = append(newLines, line)
-			continue
-		}
-		if inSourceArray {
-			if strings.HasPrefix(trimmedLine, ")") {
-				inSourceArray = false
-				// Append new URLs with filenames
-				for i, url := range urls {
-					filename := filenames[i]
-					if filename == manifestFilename {
-						newLines = append(newLines, fmt.Sprintf("    '%s::%s'", filename, url))
-					} else {
-						newLines = append(newLines, fmt.Sprintf("    '%s'", url))
-					}
-				}
-				newLines = append(newLines, line)
-				continue
-			}
-			// Skip old URLs containing "registry.ollama.ai"
-			if strings.Contains(trimmedLine, "registry.ollama.ai") {
-				continue
-			}
-		}
-		newLines = append(newLines, line)
+	// Use regex to find the source array
+	reSourceArray := regexp.MustCompile(`(?ms)(source=\().*?(\))`)
+	sourceArrayMatch := reSourceArray.FindSubmatchIndex(content)
+	if sourceArrayMatch == nil {
+		return fmt.Errorf("could not find source array in PKGBUILD")
 	}
+
+	// Build the new source array
+	var newSourceArray strings.Builder
+	newSourceArray.WriteString("source=(")
+	for i, url := range urls {
+		filename := filenames[i]
+		if filename == manifestFilename {
+			newSourceArray.WriteString(fmt.Sprintf("\n    '%s::%s'", filename, url))
+		} else {
+			newSourceArray.WriteString(fmt.Sprintf("\n    '%s'", url))
+		}
+	}
+	newSourceArray.WriteString("\n)")
+
+	// Replace the old source array with the new one
+	newContent := append(content[:sourceArrayMatch[0]], append([]byte(newSourceArray.String()), content[sourceArrayMatch[1]:]...)...)
 
 	// Write the updated PKGBUILD back to file
-	err = os.WriteFile(pkgbuildPath, []byte(strings.Join(newLines, "\n")), 0644)
+	err = os.WriteFile(pkgbuildPath, newContent, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to write to PKGBUILD: %v", err)
+		return fmt.Errorf("failed to write to PKGBUILD: %w", err)
 	}
 
-	fmt.Println("PKGBUILD successfully updated.")
+	if verbose {
+		fmt.Println("PKGBUILD successfully updated.")
+	}
 	return nil
 }
 
 func main() {
-	// Define flags with both long and short versions
-	updateFlagLong := flag.Bool("update-pkgbuild", false, "Update the ./PKGBUILD with URLs for the given model")
-	updateFlagShort := flag.Bool("u", false, "Update the ./PKGBUILD with URLs for the given model")
+	// Define flags with both long and short versions using pflag
+	updateFlag := pflag.BoolP("update-pkgbuild", "u", false, "Update the ./PKGBUILD with URLs for the given model")
+	verboseFlag := pflag.BoolP("verbose", "V", false, "Enable verbose output")
+	versionFlag := pflag.BoolP("version", "v", false, "Show the current version")
+	registryURL := pflag.StringP("registry", "r", defaultRegistry, "Registry base URL")
 
-	verboseFlagLong := flag.Bool("verbose", false, "Verbose")
-	verboseFlagShort := flag.Bool("V", false, "Verbose")
+	pflag.Parse()
 
-	versionFlagLong := flag.Bool("version", false, "Show the current version")
-	versionFlagShort := flag.Bool("v", false, "Show the current version")
-
-	flag.Parse()
-
-	// Combine long and short flags
-	updateFlag := *updateFlagLong || *updateFlagShort
-	verboseFlag := *verboseFlagLong || *verboseFlagShort
-	versionFlag := *versionFlagLong || *versionFlagShort
-
-	if versionFlag {
+	if *versionFlag {
 		fmt.Println(versionString)
 		return
 	}
 
-	baseURL, err := url.Parse(registryBaseURL)
+	// Parse the registry URL
+	baseURL, err := url.Parse(*registryURL)
 	if err != nil {
-		log.Fatalf("Error parsing URL: %v", err)
+		log.Fatalf("Error parsing registry URL '%s': %v", *registryURL, err)
 	}
-	client := NewClient(baseURL, http.DefaultClient)
+
+	// Set up HTTP client with timeout
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	client := NewClient(baseURL, httpClient)
 
 	// Define the model name (e.g., "tinyllama:latest")
 	modelName := defaultModelTag
-	if len(flag.Args()) > 0 {
-		modelName = flag.Args()[0]
+	if len(pflag.Args()) > 0 {
+		modelName = pflag.Args()[0]
 	}
 
 	// Parse the model name into repository and tag
 	repository, tag := ParseModelPath(modelName)
 
-	// Retrieve the manifest for the model
-	manifest, err := client.GetManifest(context.Background(), repository, tag, verboseFlag)
+	// Retrieve the manifest for the model with a context timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	manifest, err := client.GetManifest(ctx, repository, tag, *verboseFlag)
 	if err != nil {
 		log.Fatalf("Error retrieving manifest: %v", err)
 	}
@@ -199,7 +195,7 @@ func main() {
 
 	// Process the Config layer if it exists
 	if manifest.Config.Digest != "" {
-		if verboseFlag {
+		if *verboseFlag {
 			fmt.Printf("Processing config layer: digest = %s\n", manifest.Config.Digest)
 		}
 		blobURL := constructBlobURL(baseURL, repository, manifest.Config.Digest)
@@ -210,7 +206,7 @@ func main() {
 
 	// Process the Layers
 	for i, layer := range manifest.Layers {
-		if verboseFlag {
+		if *verboseFlag {
 			fmt.Printf("Processing layer %d: digest = %s, mediaType = %s\n", i, layer.Digest, layer.MediaType)
 		}
 		blobURL := constructBlobURL(baseURL, repository, layer.Digest)
@@ -227,8 +223,8 @@ func main() {
 	blobURLs = append(blobURLs, manifestURL)
 	filenames = append(filenames, manifestFilename)
 
-	if updateFlag {
-		if err := updatePKGBUILD(blobURLs, filenames); err != nil {
+	if *updateFlag {
+		if err := updatePKGBUILD(blobURLs, filenames, *verboseFlag); err != nil {
 			log.Fatalf("Failed to update PKGBUILD: %v", err)
 		}
 		return
